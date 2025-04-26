@@ -1,42 +1,24 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-# 1. First Streamlit command - must be at the very top
 import streamlit as st
-st.set_page_config(
-    page_title="Eventfolio - Stock Event Analyzer",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# 2. Standard library imports
-import base64
-from datetime import datetime, timedelta
-from io import BytesIO
-import warnings
-
-# 3. Third-party imports
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 import yfinance as yf
+import numpy as np
+from datetime import datetime, timedelta
+from fpdf import FPDF
+from io import BytesIO
+import matplotlib.pyplot as plt
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.ensemble import RandomForestRegressor
-
-# Configuration
+import base64
+import warnings
 warnings.filterwarnings('ignore')
-plt.style.use('ggplot')
 
-# --------------------- DATA LOADING ---------------------
+# Load Data
 @st.cache_data
 def load_data():
-    """Load and preprocess the Excel data files"""
     try:
-        economic_events = pd.read_excel('Economic Event.xlsx', engine='openpyxl')
-        industry_stocks = pd.read_excel('Industry_EconomicEvent_Stocks.xlsx', engine='openpyxl')
+        economic_events = pd.read_excel('data/Economic Event.xlsx')
+        industry_stocks = pd.read_excel('data/Industry_EconomicEvent_Stocks.xlsx')
         
-        # Clean column names and handle dates
         economic_events.columns = economic_events.columns.str.strip()
         industry_stocks.columns = industry_stocks.columns.str.strip()
         
@@ -45,12 +27,10 @@ def load_data():
         
         return economic_events, industry_stocks
     except Exception as e:
-        st.error(f"Data loading error: {str(e)}")
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# --------------------- CORE ANALYSIS FUNCTIONS ---------------------
 def calculate_risk_score(answers):
-    """Calculate user's risk score based on questionnaire answers"""
     score_map = {
         'tolerance': {'Low': 1, 'Medium': 3, 'High': 5},
         'horizon': {'<1 year': 1, '1-3 years': 2, '3-5 years': 3, '5+ years': 4},
@@ -58,9 +38,12 @@ def calculate_risk_score(answers):
         'reaction': {'Sell all': 1, 'Sell some': 2, 'Hold': 3, 'Buy more': 5}
     }
 
-    score = sum(score_map[key][answers[key]] for key in score_map)
-    
-    # Age adjustment
+    score = 0
+    score += score_map['tolerance'][answers['risk_tolerance']]
+    score += score_map['horizon'][answers['investment_horizon']]
+    score += score_map['experience'][answers['investment_experience']]
+    score += score_map['reaction'][answers['market_drop_reaction']]
+
     age = int(answers['age'])
     if age > 60:
         score = max(1, score - 2)
@@ -69,40 +52,43 @@ def calculate_risk_score(answers):
 
     return min(10, max(1, score))
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_stock_data(ticker, period='1y'):
-    """Get stock data from Yahoo Finance with error handling"""
+def get_volatility_metrics(ticker):
     try:
-        data = yf.Ticker(ticker).history(period=period)
-        return data if not data.empty else None
+        if not ticker or pd.isna(ticker):
+            return None
+            
+        data = yf.Ticker(ticker).history(period='1y')
+        if len(data) < 50:
+            return None
+        
+        daily_returns = data['Close'].pct_change().dropna()
+        
+        metrics = {
+            'volatility_score': min(10, int(np.std(daily_returns) * 100)),
+            'max_drawdown': (data['Close'].max() - data['Close'].min()) / data['Close'].max(),
+            'sharpe_ratio': np.mean(daily_returns) / np.std(daily_returns) if np.std(daily_returns) != 0 else 0,
+            'beta': calculate_beta(ticker),
+            'avg_daily_range': ((data['High'] - data['Low']).mean() / data['Close'].mean()) * 100
+        }
+        return metrics
     except Exception as e:
-        st.warning(f"Failed to fetch data for {ticker}: {str(e)}")
+        st.error(f"Error calculating volatility for {ticker}: {e}")
         return None
-
-def calculate_volatility_metrics(data):
-    """Calculate volatility metrics from stock data"""
-    if data is None or len(data) < 50:
-        return None
-    
-    daily_returns = data['Close'].pct_change().dropna()
-    metrics = {
-        'volatility_score': min(10, int(np.std(daily_returns) * 100)),
-        'max_drawdown': (data['Close'].max() - data['Close'].min()) / data['Close'].max(),
-        'sharpe_ratio': np.mean(daily_returns) / np.std(daily_returns) if np.std(daily_returns) != 0 else 0,
-        'avg_daily_range': ((data['High'] - data['Low']).mean() / data['Close'].mean()) * 100
-    }
-    return metrics
 
 def calculate_beta(ticker, benchmark='^GSPC', lookback=252):
-    """Calculate beta against a benchmark index"""
     try:
-        stock_data = get_stock_data(ticker, f'{lookback}d')
-        bench_data = get_stock_data(benchmark, f'{lookback}d')
+        if not ticker or pd.isna(ticker):
+            return 1.0
+            
+        stock_data = yf.Ticker(ticker).history(period=f'{lookback}d')['Close']
+        bench_data = yf.Ticker(benchmark).history(period=f'{lookback}d')['Close']
         
-        if stock_data is None or bench_data is None:
-            return 1.0  # Default neutral beta
+        if bench_data.empty:
+            bench_data = yf.Ticker('^NSEI').history(period=f'{lookback}d')['Close']
+            if bench_data.empty:
+                return 1.0
         
-        merged = pd.concat([stock_data['Close'], bench_data['Close']], axis=1)
+        merged = pd.concat([stock_data, bench_data], axis=1)
         merged.columns = ['stock', 'benchmark']
         merged = merged.pct_change().dropna()
         
@@ -110,418 +96,429 @@ def calculate_beta(ticker, benchmark='^GSPC', lookback=252):
             return 1.0
             
         cov_matrix = np.cov(merged['stock'], merged['benchmark'])
-        return cov_matrix[0, 1] / cov_matrix[1, 1]
-    except Exception:
+        beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+        return beta
+    except Exception as e:
+        st.error(f"Error calculating beta for {ticker}: {e}")
         return 1.0
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
-def predict_stock_performance(ticker, horizon_days=30):
-    """Predict future stock performance using ML and time series"""
+def predict_stock_performance(ticker, event_date, horizon_days=30):
     try:
-        data = get_stock_data(ticker, '2y')
-        if data is None or len(data) < 100:
+        if not ticker or pd.isna(ticker):
             return None
             
-        # Feature engineering
-        data['MA_50'] = data['Close'].rolling(50).mean()
-        data['MA_200'] = data['Close'].rolling(200).mean()
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=365*2)
+        data = yf.Ticker(ticker).history(start=start_date, end=end_date)
+        
+        if data.empty or len(data) < 100:
+            return None
+        
+        data['MA_50'] = data['Close'].rolling(window=50).mean()
+        data['MA_200'] = data['Close'].rolling(window=200).mean()
         data['Daily_Return'] = data['Close'].pct_change()
-        data['Volatility'] = data['Daily_Return'].rolling(20).std()
+        data['Volatility'] = data['Daily_Return'].rolling(window=20).std()
         data.dropna(inplace=True)
         
-        # Prepare data
         X = data[['MA_50', 'MA_200', 'Volatility']]
         y = data['Close'].shift(-horizon_days).dropna()
         X = X.iloc[:-horizon_days]
         
-        # Model training
         model = RandomForestRegressor(n_estimators=100, random_state=42)
         model.fit(X, y)
         
-        # Prediction
+        last_features = X.iloc[-1].values.reshape(1, -1)
+        predicted_price = model.predict(last_features)[0]
         current_price = data['Close'].iloc[-1]
-        predicted_price = model.predict(X.iloc[-1:].values)[0]
         predicted_change = (predicted_price - current_price) / current_price
         
-        # Time series prediction
-        ts_model = ARIMA(data['Close'].values, order=(5,1,0))
-        ts_fit = ts_model.fit()
-        ts_pred = ts_fit.forecast(steps=horizon_days)[-1]
-        ts_change = (ts_pred - current_price) / current_price
+        ts_data = data['Close'].values
+        model_arima = ARIMA(ts_data, order=(5,1,0))
+        model_fit = model_arima.fit()
+        forecast = model_fit.forecast(steps=horizon_days)
+        ts_predicted = forecast[-1]
+        ts_change = (ts_predicted - current_price) / current_price
         
-        # Combined prediction
         combined_change = (predicted_change * 0.7 + ts_change * 0.3)
         
         return {
             'current_price': current_price,
             'predicted_price': predicted_price,
             'predicted_change': combined_change,
-            'confidence': min(95, int(70 + abs(combined_change)*100))
+            'confidence': min(95, int(70 + abs(combined_change)*100)),
+            'time_series_prediction': ts_predicted,
+            'ml_prediction': predicted_price
         }
     except Exception as e:
-        st.warning(f"Prediction error for {ticker}: {str(e)}")
+        st.error(f"Error predicting {ticker}: {e}")
         return None
 
-def generate_stock_chart(ticker, period='6mo'):
-    """Generate price chart for a stock"""
+def generate_stock_plot(ticker):
     try:
-        data = get_stock_data(ticker, period)
-        if data is None:
+        if not ticker or pd.isna(ticker):
+            return None
+            
+        data = yf.Ticker(ticker).history(period='6mo')
+        if data.empty:
             return None
             
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(data.index, data['Close'], linewidth=2)
-        ax.set_title(f'{ticker} Price Trend ({period})', fontsize=12)
-        ax.set_ylabel('Price (₹)', fontsize=10)
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+        ax.plot(data.index, data['Close'], label='Closing Price')
+        ax.set_title(f'{ticker} Price Trend (6 Months)')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Price (₹)')
+        ax.grid(True)
+        
         return fig
-    except Exception:
+    except Exception as e:
+        st.error(f"Error generating plot for {ticker}: {e}")
         return None
 
-def generate_recommendation(prediction, metrics):
-    """Generate trading recommendation with targets"""
-    if prediction is None or metrics is None:
-        return None
-        
-    current = prediction['current_price']
+def calculate_recommendation(ticker, prediction, metrics):
+    current_price = prediction['current_price']
     volatility = metrics['volatility_score'] / 10
-    beta = metrics.get('beta', 1.0)
-    change = prediction['predicted_change']
+    beta = float(metrics['beta'])
     
-    # Base recommendation
-    if change > 0.05:
-        rec = "BUY"
-        target = min(prediction['predicted_price'], current * (1 + 0.1 + volatility * 0.5))
-        stop_loss = current * (1 - max(0.03, 0.1 - volatility * 0.05))
-    elif change < -0.03:
-        rec = "SELL"
-        target = max(prediction['predicted_price'], current * (1 - 0.1 - volatility * 0.5))
-        stop_loss = current * (1 + max(0.03, 0.1 - volatility * 0.05))
+    if prediction['predicted_change'] > 0.05:
+        recommendation = "BUY"
+        target = min(
+            prediction['predicted_price'],
+            current_price * (1 + 0.1 + volatility * 0.5)
+        )
+        stop_loss = current_price * (1 - max(0.03, 0.1 - volatility * 0.05))
+    elif prediction['predicted_change'] < -0.03:
+        recommendation = "SELL"
+        target = max(
+            prediction['predicted_price'],
+            current_price * (1 - 0.1 - volatility * 0.5)
+        )
+        stop_loss = current_price * (1 + max(0.03, 0.1 - volatility * 0.05))
     else:
-        rec = "HOLD"
-        target = current * 1.03
-        stop_loss = current * 0.97
+        recommendation = "HOLD"
+        target = current_price * (1 + 0.03)
+        stop_loss = current_price * (1 - 0.03)
     
-    # Adjust for beta
-    if beta > 1.2:  # High beta stocks
-        if rec == "BUY":
+    if beta > 1.2:
+        if recommendation == "BUY":
             target *= 1.05
             stop_loss *= 0.98
-        elif rec == "SELL":
+        elif recommendation == "SELL":
             target *= 0.95
             stop_loss *= 1.02
     
-    # Calculate percentages
-    target_pct = round((target - current) / current * 100, 1)
-    stop_pct = round(abs(current - stop_loss) / current * 100, 1)
-    reward_risk = round((target - current) / abs(current - stop_loss), 2)
-    
     return {
-        'action': rec,
-        'target_price': round(target, 2),
+        'recommendation': recommendation,
+        'target': round(target, 2),
         'stop_loss': round(stop_loss, 2),
-        'target_pct': target_pct,
-        'stop_pct': stop_pct,
-        'reward_risk': reward_risk,
-        'confidence': prediction['confidence']
+        'risk_reward_ratio': round((target - current_price) / (current_price - stop_loss), 2)
     }
 
-# --------------------- UI COMPONENTS ---------------------
+def filter_by_risk(stocks, risk_score):
+    filtered = []
+    for ticker in stocks:
+        metrics = get_volatility_metrics(ticker)
+        if not metrics:
+            continue
+            
+        if risk_score < 4:
+            if metrics['volatility_score'] < 4 and metrics['max_drawdown'] < 0.2 and metrics['beta'] < 0.8:
+                filtered.append((ticker, metrics))
+        elif risk_score < 7:
+            if metrics['volatility_score'] < 6 and metrics['max_drawdown'] < 0.3 and metrics['beta'] < 1.2:
+                filtered.append((ticker, metrics))
+        else:
+            filtered.append((ticker, metrics))
+    
+    filtered.sort(key=lambda x: x[1]['sharpe_ratio'], reverse=True)
+    return filtered
+
+def generate_pdf_report(risk_score):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Investment Risk Profile Report", ln=1, align='C')
+    pdf.cell(200, 10, txt=f"Risk Score: {risk_score}/10", ln=1)
+
+    risk_level = "Conservative" if risk_score < 4 else \
+                 "Moderate" if risk_score < 7 else "Aggressive"
+    pdf.multi_cell(0, 10, txt=f"Your risk profile: {risk_level}")
+    
+    if risk_score < 4:
+        pdf.multi_cell(0, 10, txt="Recommended Portfolio: 60% Bonds, 30% Large-Cap Stocks, 10% Cash")
+    elif risk_score < 7:
+        pdf.multi_cell(0, 10, txt="Recommended Portfolio: 40% Large-Cap Stocks, 30% Mid-Cap Stocks, 20% Bonds, 10% International")
+    else:
+        pdf.multi_cell(0, 10, txt="Recommended Portfolio: 50% Growth Stocks, 20% Small-Cap, 20% International, 10% Alternative Investments")
+
+    return pdf.output(dest='S').encode('latin1')
+
 def risk_questionnaire():
-    """Display risk assessment questionnaire"""
-    st.title("📝 Risk Profile Assessment")
+    st.title("Risk Profile Questionnaire")
     
     with st.form("risk_form"):
-        st.write("### Personal Information")
-        age = st.number_input("Your Age", min_value=18, max_value=100, value=35)
+        age = st.selectbox("Your Age", ["<30", "30-40", "40-50", "50-60", ">60"])
+        risk_tolerance = st.selectbox("Risk Tolerance", ["Low", "Medium", "High"])
+        investment_horizon = st.selectbox("Investment Horizon", ["<1 year", "1-3 years", "3-5 years", "5+ years"])
+        investment_experience = st.selectbox("Investment Experience", ["None", "Some", "Experienced"])
+        market_drop_reaction = st.selectbox("If your portfolio drops 20% in a month, you would:", 
+                                          ["Sell all", "Sell some", "Hold", "Buy more"])
         
-        st.write("### Investment Preferences")
-        cols = st.columns(2)
-        risk_tolerance = cols[0].select_slider(
-            "Risk Tolerance",
-            options=["Low", "Medium", "High"],
-            value="Medium"
-        )
-        horizon = cols[1].selectbox(
-            "Investment Horizon",
-            options=["<1 year", "1-3 years", "3-5 years", "5+ years"],
-            index=2
-        )
+        submitted = st.form_submit_button("Calculate Risk Score")
         
-        experience = st.radio(
-            "Investment Experience Level",
-            options=["Beginner", "Intermediate", "Advanced"],
-            index=1
-        )
-        
-        reaction = st.selectbox(
-            "If your portfolio loses 20% in a month, you would:",
-            options=["Sell all investments", "Sell some investments", 
-                   "Hold and wait for recovery", "Buy more at lower prices"],
-            index=2
-        )
-        
-        if st.form_submit_button("Calculate My Risk Profile"):
-            # Map inputs to scoring system
-            exp_map = {"Beginner": "None", "Intermediate": "Some", "Advanced": "Experienced"}
-            react_map = {
-                "Sell all investments": "Sell all",
-                "Sell some investments": "Sell some",
-                "Hold and wait for recovery": "Hold",
-                "Buy more at lower prices": "Buy more"
-            }
-            
+        if submitted:
             answers = {
                 'age': age,
                 'risk_tolerance': risk_tolerance,
-                'investment_horizon': horizon,
-                'investment_experience': exp_map[experience],
-                'market_drop_reaction': react_map[reaction]
+                'investment_horizon': investment_horizon,
+                'investment_experience': investment_experience,
+                'market_drop_reaction': market_drop_reaction
             }
             
-            st.session_state.risk_score = calculate_risk_score(answers)
-            st.session_state.risk_answers = answers
-            st.success("Risk assessment completed!")
-            st.experimental_rerun()
+            # Convert age to numeric value for calculation
+            age_map = {"<30": 25, "30-40": 35, "40-50": 45, "50-60": 55, ">60": 65}
+            answers['age'] = str(age_map[age])
+            
+            risk_score = calculate_risk_score(answers)
+            st.session_state['risk_score'] = risk_score
+            
+            risk_level = "Conservative" if risk_score < 4 else \
+                         "Moderate" if risk_score < 7 else "Aggressive"
+            
+            st.success(f"Your Risk Score: {risk_score}/10 ({risk_level})")
+            
+            if risk_score < 4:
+                st.info("""
+                **Recommended Strategy:**  
+                - Focus on capital preservation  
+                - Prefer low-volatility investments  
+                - Consider bonds, large-cap stocks, and fixed income instruments
+                """)
+            elif risk_score < 7:
+                st.info("""
+                **Recommended Strategy:**  
+                - Balanced approach between growth and safety  
+                - Diversify across asset classes  
+                - Mix of large-cap and mid-cap stocks with some bonds
+                """)
+            else:
+                st.info("""
+                **Recommended Strategy:**  
+                - Focus on capital growth  
+                - Can tolerate higher volatility  
+                - Consider growth stocks, small-caps, and international exposure
+                """)
 
-def display_risk_profile():
-    """Show user's risk profile summary"""
+def dashboard():
+    st.title("Economic Event Dashboard")
+    
     if 'risk_score' not in st.session_state:
-        return
-        
-    score = st.session_state.risk_score
-    risk_level = "Conservative" if score < 4 else "Moderate" if score < 7 else "Aggressive"
-    
-    with st.sidebar:
-        st.subheader("Your Risk Profile")
-        st.metric("Risk Score", f"{score}/10", delta=risk_level)
-        
-        # Display recommendation
-        if score < 4:
-            st.info("""
-            **Recommended Portfolio:**  
-            • 60% Bonds  
-            • 30% Large-Cap Stocks  
-            • 10% Cash
-            """)
-        elif score < 7:
-            st.info("""
-            **Recommended Portfolio:**  
-            • 40% Large-Cap Stocks  
-            • 30% Mid-Cap Stocks  
-            • 20% Bonds  
-            • 10% International
-            """)
-        else:
-            st.info("""
-            **Recommended Portfolio:**  
-            • 50% Growth Stocks  
-            • 20% Small-Cap  
-            • 20% International  
-            • 10% Alternative Investments
-            """)
-
-def event_dashboard():
-    """Main dashboard showing upcoming events"""
-    st.title("📈 Eventfolio Dashboard")
-    economic_events, industry_stocks = load_data()
-    
-    if economic_events.empty or industry_stocks.empty:
-        st.error("Failed to load required data files")
+        st.warning("Please complete the risk questionnaire first.")
+        risk_questionnaire()
         return
     
-    display_risk_profile()
+    economic_events_df, industry_stocks_df = load_data()
     
-    # Upcoming events section
-    st.header("📅 Upcoming Economic Events")
+    if economic_events_df.empty or industry_stocks_df.empty:
+        st.error("Failed to load data. Please check the data files.")
+        return
+    
+    st.sidebar.header("Filters")
+    risk_score = st.sidebar.slider("Adjust Risk Tolerance", 1, 10, st.session_state['risk_score'])
+    st.session_state['risk_score'] = risk_score
+    
     today = datetime.now().date()
-    upcoming = economic_events[economic_events['Date'] >= today].sort_values('Date').head(10)
+    upcoming = economic_events_df[economic_events_df['Date'] >= today]
+    upcoming = upcoming.sort_values('Date').head(20)
     
-    if upcoming.empty:
-        st.info("No upcoming economic events found")
-    else:
-        for _, event in upcoming.iterrows():
-            with st.expander(f"{event['Economic Event']} - {event['Date']}"):
-                cols = st.columns([3, 1])
-                cols[0].write(f"**Country:** {event['Country']}")
-                cols[0].write(f"**Impact:** {event['Impact']}")
-                cols[1].write(event.get('Description', 'No description available'))
-                
-                if st.button("Analyze Impact", key=f"analyze_{event['Economic Event']}"):
-                    analyze_event_stocks(event['Economic Event'], industry_stocks)
+    st.subheader(f"Upcoming Economic Events (Risk Profile: {risk_score}/10)")
+    
+    for _, event in upcoming.iterrows():
+        with st.expander(f"{event['Date']} - {event['Economic Event']}"):
+            st.write(f"**Country:** {event['Country']}")
+            st.write(f"**Impact:** {event.get('Impact', 'N/A')}")
+            st.write(f"**Previous:** {event.get('Previous', 'N/A')}")
+            st.write(f"**Forecast:** {event.get('Forecast', 'N/A')}")
+            
+            if st.button(f"Analyze Impact on Stocks", key=f"analyze_{event['Economic Event']}"):
+                st.session_state['selected_event'] = event
+                st.session_state['page'] = 'analysis'
 
-def analyze_event_stocks(event_name, industry_stocks):
-    """Analyze stocks related to a specific economic event"""
-    st.title(f"🔍 {event_name} Analysis")
-    st.write("Analyzing stocks impacted by this event...")
+def analyze_event(event):
+    st.title(f"Analysis: {event['Economic Event']}")
+    st.write(f"**Date:** {event['Date']}")
+    st.write(f"**Country:** {event['Country']}")
     
-    # Get all tickers for this event
-    related = industry_stocks[industry_stocks['Economic Event'] == event_name]
-    if related.empty:
-        st.warning("No stock data available for this event")
+    if st.button("← Back to Dashboard"):
+        st.session_state['page'] = 'dashboard'
         return
     
-    tickers = []
-    for stocks in related['Stocks']:
-        if pd.notna(stocks):
-            tickers.extend([t.strip() for t in stocks.split(',') if t.strip()])
-    
-    if not tickers:
-        st.warning("No valid stock tickers found")
+    _, industry_stocks_df = load_data()
+    related_stocks = industry_stocks_df[industry_stocks_df['Economic Event'] == event['Economic Event']]
+
+    stocks = []
+    for _, row in related_stocks.iterrows():
+        if pd.notna(row['Stocks']):
+            for ticker in row['Stocks'].split(','):
+                ticker_clean = ticker.strip()
+                if ticker_clean:
+                    stocks.append(ticker_clean)
+
+    risk_filtered = filter_by_risk(stocks, st.session_state['risk_score'])
+
+    if not risk_filtered:
+        st.warning("No suitable stocks found for your risk profile.")
         return
     
-    # Filter stocks based on risk profile
-    filtered_stocks = []
-    for ticker in tickers:
-        data = get_stock_data(ticker)
-        if data is None:
+    st.subheader(f"Stock Recommendations (Filtered for Risk Score: {st.session_state['risk_score']})")
+    
+    for ticker, metrics in risk_filtered:
+        prediction = predict_stock_performance(ticker, event['Date'])
+        if not prediction:
             continue
             
-        metrics = calculate_volatility_metrics(data)
-        if metrics is None:
-            continue
-            
-        metrics['beta'] = calculate_beta(ticker)
+        plot = generate_stock_plot(ticker)
+        recommendation = calculate_recommendation(ticker, prediction, metrics)
         
-        # Risk-based filtering
-        score = st.session_state.get('risk_score', 5)
-        if score < 4:  # Conservative
-            if metrics['volatility_score'] < 4 and metrics['beta'] < 0.8:
-                filtered_stocks.append((ticker, metrics))
-        elif score < 7:  # Moderate
-            if metrics['volatility_score'] < 6 and metrics['beta'] < 1.2:
-                filtered_stocks.append((ticker, metrics))
-        else:  # Aggressive
-            filtered_stocks.append((ticker, metrics))
-    
-    if not filtered_stocks:
-        st.warning("No stocks match your risk profile")
-        return
-    
-    # Display analysis for each stock
-    st.header("📊 Recommended Stocks")
-    st.write(f"Found {len(filtered_stocks)} stocks matching your risk profile")
-    
-    for ticker, metrics in filtered_stocks:
         with st.container():
-            st.markdown("---")
+            col1, col2 = st.columns([1, 3])
             
-            # Get predictions
-            prediction = predict_stock_performance(ticker)
-            if prediction is None:
-                continue
+            with col1:
+                if plot:
+                    st.pyplot(plot)
+            
+            with col2:
+                st.subheader(ticker)
                 
-            recommendation = generate_recommendation(prediction, metrics)
-            if recommendation is None:
-                continue
-            
-            # Stock header
-            cols = st.columns([3, 1])
-            cols[0].subheader(ticker)
-            
-            # Price change indicator
-            change = prediction['predicted_change']
-            delta_color = "normal" if change > 0 else "inverse"
-            cols[1].metric(
-                "Predicted Change", 
-                f"{change*100:.1f}%",
-                delta_color=delta_color
-            )
-            
-            # Key metrics
-            m_cols = st.columns(4)
-            m_cols[0].metric("Volatility", f"{metrics['volatility_score']}/10")
-            m_cols[1].metric("Beta", f"{metrics['beta']:.2f}")
-            m_cols[2].metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-            m_cols[3].metric("Max Drawdown", f"{metrics['max_drawdown']*100:.1f}%")
-            
-            # Confidence indicator
-            st.progress(
-                recommendation['confidence']/100, 
-                f"Analysis Confidence: {recommendation['confidence']}%"
-            )
-            
-            # Trading recommendation
-            rec_color = {
-                "BUY": "green",
-                "SELL": "red",
-                "HOLD": "orange"
-            }[recommendation['action']]
-            
-            st.markdown(
-                f"""
-                <div style='background-color:{rec_color}10; 
-                    padding:1rem; 
-                    border-radius:8px; 
-                    border-left:4px solid {rec_color};
-                    margin:1rem 0;'>
-                    <h3 style='color:{rec_color}; text-align:center;'>
-                        {recommendation['action']} RECOMMENDATION
-                    </h3>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            
-            # Price targets
-            t_cols = st.columns(3)
-            t_cols[0].metric("Current Price", f"₹{prediction['current_price']:.2f}")
-            t_cols[1].metric(
-                "Target Price", 
-                f"₹{recommendation['target_price']:.2f}", 
-                f"+{recommendation['target_pct']}%"
-            )
-            t_cols[2].metric(
-                "Stop Loss", 
-                f"₹{recommendation['stop_loss']:.2f}", 
-                f"-{recommendation['stop_pct']}%",
-                delta_color="inverse"
-            )
-            
-            # Risk/reward
-            st.metric("Risk/Reward Ratio", f"{recommendation['reward_risk']}:1")
-            
-            # Price chart
-            chart = generate_stock_chart(ticker)
-            if chart:
-                st.pyplot(chart)
-
-# --------------------- MAIN APP ---------------------
-def main():
-    """Main application controller"""
-    # Initialize session state
-    if 'risk_score' not in st.session_state:
-        st.session_state.risk_score = None
-    if 'current_page' not in st.session_state:
-        st.session_state.current_page = "Dashboard"
-    
-    # Navigation sidebar
-    with st.sidebar:
-        st.title("Eventfolio")
-        
-        if st.session_state.risk_score:
-            display_risk_profile()
-        
-        if st.button("🔄 Update Risk Profile"):
-            st.session_state.current_page = "Questionnaire"
-            st.experimental_rerun()
-        
+                cols = st.columns(4)
+                cols[0].metric("Current Price", f"₹{prediction['current_price']:.2f}")
+                cols[1].metric("Predicted Change", f"{prediction['predicted_change']*100:.1f}%", 
+                              delta_color="inverse" if prediction['predicted_change'] < 0 else "normal")
+                cols[2].metric("Volatility", f"{metrics['volatility_score']}/10")
+                cols[3].metric("Beta", f"{metrics['beta']:.2f}")
+                
+                st.write(f"**Recommendation:** :{'red' if recommendation['recommendation'] == 'SELL' else 'green'}[{recommendation['recommendation']}]")
+                st.write(f"**Target Price:** ₹{recommendation['target']:.2f}")
+                st.write(f"**Stop Loss:** ₹{recommendation['stop_loss']:.2f}")
+                st.write(f"**Risk/Reward Ratio:** {recommendation['risk_reward_ratio']:.2f}:1")
+                
+                expander = st.expander("Detailed Metrics")
+                with expander:
+                    cols = st.columns(3)
+                    cols[0].write(f"**Sharpe Ratio:** {metrics['sharpe_ratio']:.2f}")
+                    cols[1].write(f"**Max Drawdown:** {metrics['max_drawdown']*100:.1f}%")
+                    cols[2].write(f"**Avg Daily Range:** {metrics['avg_daily_range']:.1f}%")
+                    cols[0].write(f"**Confidence:** {prediction['confidence']}%")
+                    cols[1].write(f"**Predicted Price:** ₹{prediction['predicted_price']:.2f}")
+                
         st.markdown("---")
-        st.write("Navigate to:")
-        if st.button("📊 Dashboard"):
-            st.session_state.current_page = "Dashboard"
-            st.experimental_rerun()
+
+def report_page():
+    st.title("Investment Risk Profile Report")
+    
+    if 'risk_score' not in st.session_state:
+        st.warning("Please complete the risk questionnaire first.")
+        risk_questionnaire()
+        return
+    
+    risk_score = st.session_state['risk_score']
+    risk_level = "Conservative" if risk_score < 4 else \
+                 "Moderate" if risk_score < 7 else "Aggressive"
+    
+    st.subheader(f"Your Risk Score: {risk_score}/10 ({risk_level})")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Risk Tolerance", risk_level)
+    col2.metric("Recommended Stocks", "Large-Cap" if risk_score < 4 else "Mix" if risk_score < 7 else "Growth")
+    col3.metric("Volatility Tolerance", "Low" if risk_score < 4 else "Medium" if risk_score < 7 else "High")
+    
+    st.markdown("---")
+    
+    if risk_score < 4:
+        st.header("Conservative Portfolio Recommendation")
+        st.write("""
+        - **60% Bonds/Fixed Income**: Government securities, corporate bonds with high ratings
+        - **30% Large-Cap Stocks**: Blue-chip companies with stable dividends
+        - **10% Cash**: For liquidity and emergency funds
+        """)
+        
+        st.write("""
+        **Investment Strategy:**  
+        Focus on capital preservation with steady, predictable returns. Avoid high-volatility assets.
+        Rebalance portfolio annually to maintain risk profile.
+        """)
+        
+    elif risk_score < 7:
+        st.header("Moderate Portfolio Recommendation")
+        st.write("""
+        - **40% Large-Cap Stocks**: Established companies with growth potential
+        - **30% Mid-Cap Stocks**: Growing companies with reasonable valuations
+        - **20% Bonds**: For stability and income generation
+        - **10% International**: Diversification across global markets
+        """)
+        
+        st.write("""
+        **Investment Strategy:**  
+        Balanced approach between growth and safety. Regular monitoring (quarterly) to adjust 
+        allocations based on market conditions. Consider index funds for core holdings.
+        """)
+        
+    else:
+        st.header("Aggressive Portfolio Recommendation")
+        st.write("""
+        - **50% Growth Stocks**: High-growth potential companies
+        - **20% Small-Cap**: Emerging companies with high growth potential
+        - **20% International**: Exposure to global growth opportunities
+        - **10% Alternative Investments**: REITs, commodities, or cryptocurrencies
+        """)
+        
+        st.write("""
+        **Investment Strategy:**  
+        Focus on long-term capital growth. Can tolerate short-term volatility. 
+        Active monitoring recommended. Consider sector rotation strategies.
+        """)
+    
+    st.markdown("---")
+    st.subheader("Download Your Report")
+    
+    if st.button("Generate PDF Report"):
+        pdf_data = generate_pdf_report(risk_score)
+        st.download_button(
+            label="Download Risk Report",
+            data=pdf_data,
+            file_name="investment_risk_report.pdf",
+            mime="application/pdf"
+        )
+
+def main():
+    st.set_page_config(
+        page_title="Investment Risk Analyzer",
+        page_icon="📈",
+        layout="wide"
+    )
+    
+    if 'page' not in st.session_state:
+        st.session_state['page'] = 'dashboard'
+    
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    if st.sidebar.button("Dashboard"):
+        st.session_state['page'] = 'dashboard'
+    if st.sidebar.button("Risk Questionnaire"):
+        st.session_state['page'] = 'questionnaire'
+    if st.sidebar.button("Risk Report"):
+        st.session_state['page'] = 'report'
     
     # Page routing
-    if st.session_state.current_page == "Questionnaire":
+    if st.session_state['page'] == 'dashboard':
+        dashboard()
+    elif st.session_state['page'] == 'questionnaire':
         risk_questionnaire()
-        if st.session_state.risk_score is not None:
-            if st.button("← Back to Dashboard"):
-                st.session_state.current_page = "Dashboard"
-                st.experimental_rerun()
+    elif st.session_state['page'] == 'report':
+        report_page()
+    elif st.session_state['page'] == 'analysis' and 'selected_event' in st.session_state:
+        analyze_event(st.session_state['selected_event'])
     else:
-        event_dashboard()
+        dashboard()
 
 if __name__ == '__main__':
     main()

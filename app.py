@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(page_title="Economic Event Stock Analyzer", layout="wide")  # Must be first Streamlit command
+st.set_page_config(page_title="Economic Event Stock Analyzer", layout="wide")  # MUST BE FIRST
 
 import pandas as pd
 import yfinance as yf
@@ -12,6 +12,7 @@ import base64
 from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
+
 
 # Load Data
 @st.cache_data

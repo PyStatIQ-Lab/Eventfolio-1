@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(page_title="Economic Event Stock Analyzer", layout="wide")  # <-- move here first
+st.set_page_config(page_title="Economic Event Stock Analyzer", layout="wide")  # Must be first Streamlit command
 
 import pandas as pd
 import yfinance as yf
@@ -12,7 +12,6 @@ import base64
 from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
-
 
 # Load Data
 @st.cache_data
@@ -190,17 +189,11 @@ def calculate_recommendation(ticker, prediction, metrics):
     
     if prediction['predicted_change'] > 0.05:
         recommendation = "BUY"
-        target = min(
-            prediction['predicted_price'],
-            current_price * (1 + 0.1 + volatility * 0.5)
-        )
+        target = min(prediction['predicted_price'], current_price * (1 + 0.1 + volatility * 0.5))
         stop_loss = current_price * (1 - max(0.03, 0.1 - volatility * 0.05))
     elif prediction['predicted_change'] < -0.03:
         recommendation = "SELL"
-        target = max(
-            prediction['predicted_price'],
-            current_price * (1 - 0.1 - volatility * 0.5)
-        )
+        target = max(prediction['predicted_price'], current_price * (1 - 0.1 - volatility * 0.5))
         stop_loss = current_price * (1 + max(0.03, 0.1 - volatility * 0.05))
     else:
         recommendation = "HOLD"

@@ -339,7 +339,7 @@ def dashboard():
             st.write(f"**Previous:** {event.get('Previous', 'N/A')}")
             st.write(f"**Forecast:** {event.get('Forecast', 'N/A')}")
             
-            if st.button(f"Analyze Impact on Stocks", key=f"analyze_{event['Economic Event']}"):
+            if st.button(f"Analyze Impact on Stocks", key=f"analyze_{event['Date']}_{event['Economic Event']}"):
                 st.session_state['selected_event'] = event
                 st.session_state['page'] = 'analysis'
 

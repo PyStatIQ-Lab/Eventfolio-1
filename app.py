@@ -14,7 +14,7 @@ import base64
 import warnings
 warnings.filterwarnings('ignore')
 
-# This must be the first Streamlit command
+# ========== MUST BE THE FIRST STREAMLIT COMMAND ==========
 st.set_page_config(
     page_title="Investment Risk Analyzer",
     page_icon="📈",
@@ -22,6 +22,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ========== NOW YOU CAN ADD OTHER STREAMLIT COMMANDS ==========
 # Custom CSS for styling
 st.markdown("""
 <style>
@@ -794,6 +795,25 @@ def main():
         initial_sidebar_state="expanded"
     )
     
+    # Initialize session state
+    if 'page' not in st.session_state:
+        st.session_state['page'] = 'dashboard'
+    if 'risk_score' not in st.session_state:
+        st.session_state['risk_score'] = 5  # Default medium risk
+    
+    # Page routing
+    if st.session_state['page'] == 'dashboard':
+        dashboard()
+    elif st.session_state['page'] == 'questionnaire':
+        risk_questionnaire()
+    elif st.session_state['page'] == 'report':
+        report_page()
+    elif st.session_state['page'] == 'analysis' and 'selected_event' in st.session_state:
+        analyze_event(st.session_state['selected_event'])
+    else:
+        dashboard()
+
+def main():
     # Initialize session state
     if 'page' not in st.session_state:
         st.session_state['page'] = 'dashboard'

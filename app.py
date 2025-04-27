@@ -8,6 +8,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Now we can add other imports and custom CSS
 import pandas as pd
 import yfinance as yf
 import numpy as np

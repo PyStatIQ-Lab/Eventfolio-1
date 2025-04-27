@@ -1,4 +1,13 @@
 import streamlit as st
+
+# Set page config must be first Streamlit command
+st.set_page_config(
+    page_title="Investment Risk Analyzer",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import pandas as pd
 import yfinance as yf
 import numpy as np
